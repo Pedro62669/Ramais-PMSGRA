@@ -1,12 +1,12 @@
 <?php
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
+// Desabilitar exibição de erros em produção (comentar as linhas abaixo para debug)
+// error_reporting(E_ALL);
+// ini_set('display_errors', 1);
+// ini_set('display_startup_errors', 1);
 session_start();
 
 // =================== CONFIGURAÇÕES DO BANCO DE DADOS ===================
 require_once __DIR__ . '/config.php';
-[$servidor, $usuario, $senha, $banco] = get_db_credentials();
 // =====================================================================
 
 // DETECTA SE A REQUISIÇÃO É AJAX (CHAVE PARA O LIVE SEARCH)
@@ -17,12 +17,8 @@ $itens_por_pagina = 20;
 $pagina_atual = isset($_GET['pagina']) ? max(1, intval($_GET['pagina'])) : 1;
 $offset = ($pagina_atual - 1) * $itens_por_pagina;
 
-// Conexão com o banco de dados
-$conexao = new mysqli($servidor, $usuario, $senha, $banco);
-if ($conexao->connect_error) {
-    die("Falha na conexão: " . $conexao->connect_error);
-}
-$conexao->set_charset("utf8mb4");
+// Conexão com o banco de dados (usando função centralizada)
+$conexao = get_db_connection();
 
 // Função para buscar a lista de tabelas (setores)
 function get_lista_setores($conexao) {
@@ -37,55 +33,54 @@ function get_lista_setores($conexao) {
 }
 
 $lista_setores = get_lista_setores($conexao);
-$todos_os_resultados = []; // Usaremos esta variável para os resultados
-$termo_busca = '';
-$setor_busca = '';
-$form_enviado = false;
-$total_resultados = 0;
-$total_paginas = 0;
-
-// Monta a consulta sempre: por padrão carrega todos os ramais (setor=todos)
-$form_enviado = true;
+$todos_os_resultados = [];
 $termo_busca = trim($_GET['busca'] ?? '');
 $setor_busca = $_GET['setor'] ?? 'todos';
+$total_resultados = 0;
+$total_paginas = 0;
 $like_termo = "%" . $termo_busca . "%";
 
-    $queries = [];
-    $tabelas_para_buscar = ($setor_busca == 'todos') ? $lista_setores : [$setor_busca];
+// Monta queries para cada setor
+$queries = [];
+$tabelas_para_buscar = ($setor_busca == 'todos') ? $lista_setores : [$setor_busca];
 
-    foreach ($tabelas_para_buscar as $tabela) {
-        if (!in_array($tabela, $lista_setores)) continue;
-
-        if (empty($termo_busca)) {
-            $queries[] = "(SELECT *, '$tabela' as setor FROM `$tabela`)";
-        } else {
-            $queries[] = "(SELECT *, '$tabela' as setor FROM `$tabela` WHERE `descricao` LIKE ? OR `falar_com` LIKE ? OR `ramal` LIKE ? OR `sub_setor` LIKE ? OR '$tabela' LIKE ?)";
-        }
+foreach ($tabelas_para_buscar as $tabela) {
+    if (!in_array($tabela, $lista_setores)) continue;
+    
+    if (empty($termo_busca)) {
+        $queries[] = "(SELECT *, '$tabela' as setor FROM `$tabela`)";
+    } else {
+        $queries[] = "(SELECT *, '$tabela' as setor FROM `$tabela` WHERE `descricao` LIKE ? OR `falar_com` LIKE ? OR `ramal` LIKE ? OR `sub_setor` LIKE ? OR '$tabela' LIKE ?)";
     }
+}
 
+// Executa busca se houver queries
 if (!empty($queries)) {
     $sql_base = implode(" UNION ALL ", $queries);
     $sql_count = "SELECT COUNT(*) AS total FROM (" . $sql_base . ") AS t";
     $stmt_count = $conexao->prepare($sql_count);
-
-        if (!empty($termo_busca)) {
-            $tipos = str_repeat('sssss', count($queries));
-            $params = [];
-            for ($i = 0; $i < count($queries); $i++) {
-                array_push($params, $like_termo, $like_termo, $like_termo, $like_termo, $like_termo);
-            }
-            $stmt_count->bind_param($tipos, ...$params);
+    
+    // Prepara parâmetros se houver termo de busca
+    if (!empty($termo_busca)) {
+        $tipos = str_repeat('sssss', count($queries));
+        $params = [];
+        for ($i = 0; $i < count($queries); $i++) {
+            $params = array_merge($params, [$like_termo, $like_termo, $like_termo, $like_termo, $like_termo]);
         }
-
+        $stmt_count->bind_param($tipos, ...$params);
+    }
+    
+    // Conta total de resultados
     $stmt_count->execute();
     $total_resultados = intval($stmt_count->get_result()->fetch_assoc()['total'] ?? 0);
     $total_paginas = ($total_resultados > 0) ? ceil($total_resultados / $itens_por_pagina) : 0;
     $stmt_count->close();
     
+    // Busca resultados paginados
     if ($total_resultados > 0) {
         $sql_paginado = $sql_base . " ORDER BY setor, sub_setor, descricao LIMIT ? OFFSET ?";
         $stmt_paginado = $conexao->prepare($sql_paginado);
-
+        
         if (!empty($termo_busca)) {
             $tipos_paginado = $tipos . 'ii';
             $params_paginado = array_merge($params, [$itens_por_pagina, $offset]);
@@ -93,7 +88,7 @@ if (!empty($queries)) {
         } else {
             $stmt_paginado->bind_param('ii', $itens_por_pagina, $offset);
         }
-
+        
         $stmt_paginado->execute();
         $resultado_paginado = $stmt_paginado->get_result();
         while ($linha = $resultado_paginado->fetch_assoc()) {
@@ -102,6 +97,7 @@ if (!empty($queries)) {
         $stmt_paginado->close();
     }
 }
+
 $conexao->close();
 
 // SE NÃO FOR AJAX, RENDERIZA O CABEÇALHO E TOPO DA PÁGINA
@@ -121,30 +117,50 @@ if (!$is_ajax):
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-        /* Paleta moderna: verde folha, amarelo melão, laranja mamão */
+        /* ====================================================================
+           VARIÁVEIS CSS - PALETA DE CORES E DESIGN TOKENS
+           ==================================================================== */
         :root { 
-            --leaf:#2e7d32; 
-            --leaf-700:#256628; 
-            --papaya:#ff6a2a; 
-            --papaya-700:#e65100; 
-            --border:#e6efe6; 
-            --bg:#f5f7f5; 
-            --text:#233127; 
-            --muted:#6b7a6d;
+            /* Cores principais */
+            --leaf: #2e7d32; 
+            --leaf-700: #1b5e20; 
+            --leaf-light: #e8f5e9;
+            --papaya: #ff6a2a; 
+            --papaya-700: #e65100; 
+            
+            /* Cores neutras */
+            --off-white: #fafafa;
+            --border: #e2e8f0; 
+            --bg: #f5f7fa; 
+            --bg-gradient: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
+            --text: #1a202c; 
+            --text-light: #4a5568;
+            --muted: #718096;
+            
+            /* Espaçamento */
             --mobile-padding: 16px;
+            
+            /* Sombras */
+            --shadow-sm: 0 2px 8px rgba(0,0,0,0.04);
+            --shadow-md: 0 4px 16px rgba(0,0,0,0.08);
+            --shadow-lg: 0 10px 40px rgba(0,0,0,0.12);
         }
         
+        /* Reset básico */
         * {
             box-sizing: border-box;
         }
         
+        /* ====================================================================
+           LAYOUT BASE
+           ==================================================================== */
         body { 
-            font-family: 'Inter', system-ui, sans-serif; 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
             line-height: 1.6; 
             color: var(--text); 
-            background-color: var(--bg); 
+            background: var(--bg-gradient);
             margin: 0; 
-            padding: 0;
+            padding: 20px;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
         }
@@ -152,189 +168,285 @@ if (!$is_ajax):
         .container { 
             max-width: 100%; 
             margin: 0 auto; 
-            background-color: #fff; 
-            padding: 20px var(--mobile-padding); 
-            min-height: 100vh;
+            background-color: var(--off-white); 
+            padding: 0;
+            min-height: calc(100vh - 40px);
+            border-radius: 16px;
+            box-shadow: var(--shadow-lg);
+            overflow: hidden;
         }
         
         @media (min-width: 768px) {
+            body {
+                padding: 24px;
+            }
             .container {
-                max-width: 1000px;
-                padding: 28px;
+                max-width: 1200px;
                 min-height: auto;
-                border-radius: 12px;
-                box-shadow: 0 8px 24px rgba(0,0,0,0.06);
-                border: 1px solid var(--border);
-                margin: 24px auto;
             }
         }
         
+        /* ====================================================================
+           HEADER
+           ==================================================================== */
+        
         .header-container {
-            position: relative;
+            background: var(--off-white);
+            padding: 24px 32px;
             display: flex;
             align-items: center;
-            justify-content: center;
-            margin-bottom: 24px;
-            min-height: 80px;
+            justify-content: space-between;
+            border-bottom: 1px solid #e2e8f0;
+            position: relative;
+        }
+        
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 16px;
         }
         
         .logo {
-            position: absolute;
-            left: 0;
-            top: 50%;
-            transform: translateY(-50%);
             height: 60px;
             width: auto;
             max-width: 200px;
         }
         
-        @media (max-width: 767px) {
-            .header-container {
-                min-height: 60px;
-                flex-direction: column;
-                gap: 12px;
-                padding-top: 10px;
-            }
-            
-            .logo {
-                position: static;
-                transform: none;
-                height: 50px;
-                max-width: 150px;
-                margin: 0 auto;
-            }
-            
-            h1 {
-                font-size: 1.3rem;
-                margin-top: 8px;
-            }
-        }
-        
         h1 { 
-            color: var(--leaf); 
-            text-align: center; 
-            font-weight: 700; 
-            letter-spacing: .2px;
-            font-size: 1.5rem;
+            color: #2e7d32; 
+            font-weight: 600; 
+            letter-spacing: -0.3px;
+            font-size: 1.95rem;
             margin: 0;
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
         }
         
         @media (min-width: 768px) {
             h1 {
-                font-size: 2rem;
+                font-size: 2.275rem;
             }
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-left: auto;
+        }
+        
+        .header-actions a {
+            padding: 10px 20px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 14px;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+        
+        .header-actions a:first-child {
+            background: linear-gradient(135deg, #ff6a2a 0%, #e65100 100%);
+            color: white;
+            box-shadow: 0 2px 8px rgba(255, 106, 42, 0.2);
+        }
+        
+        .header-actions a:first-child:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(255, 106, 42, 0.3);
+        }
+        
+        .header-actions a:last-child {
+            background: #d32f2f;
+            color: white;
+            box-shadow: 0 2px 8px rgba(211, 47, 47, 0.2);
+        }
+        
+        .header-actions a:last-child:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(211, 47, 47, 0.3);
+        }
+        
+        @media (max-width: 767px) {
+            .header-container {
+                flex-direction: column;
+                gap: 16px;
+                padding: 20px 16px;
+                align-items: center;
+            }
+            
+            .logo-section {
+                width: 100%;
+                justify-content: center;
+            }
+            
+            .logo {
+                height: 45px;
+                max-width: 150px;
+            }
+            
+            h1 {
+                font-size: 1.69rem;
+                position: static;
+                transform: none;
+                order: 2;
+                width: 100%;
+            }
+            
+            .logo-section {
+                order: 1;
+            }
+            
+            .header-actions {
+                width: 100%;
+                justify-content: center;
+                order: 3;
+            }
+            
+            .header-actions a {
+                padding: 10px 16px;
+                font-size: 13px;
+            }
+        }
+        
+        /* ====================================================================
+           SEÇÃO DE BUSCA
+           ==================================================================== */
+        .search-section {
+            padding: 32px;
+            background: #f8fafc;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .content-section {
+            padding: 32px;
         }
         
         form { 
             display: flex; 
             flex-direction: column;
-            gap: 12px; 
-            margin-bottom: 24px; 
+            gap: 16px; 
         }
         
         @media (min-width: 768px) {
             form {
                 flex-direction: row;
-                align-items: center;
-                gap: 14px;
+                align-items: flex-end;
+                gap: 16px;
             }
         }
         
-        form input, form select, form button { 
-            padding: 16px 18px; 
-            border: 1px solid var(--border); 
-            border-radius: 12px; 
-            font-size: 16px; 
-            background: #fff; 
+        .form-group {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .form-group label {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-light);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        form input, form select { 
+            padding: 10px 16px; 
+            border: 2px solid var(--border); 
+            border-radius: 8px; 
+            font-size: 15px; 
+            background: var(--off-white); 
             color: var(--text);
             width: 100%;
+            height: 44px;
+            font-family: inherit;
+            transition: all 0.2s;
             -webkit-appearance: none;
             appearance: none;
         }
         
-        @media (min-width: 768px) {
-            form input, form select, form button {
-                padding: 12px 14px;
-                border-radius: 50px;
-                width: auto;
-            }
-            
-            form input { 
-                flex: 3 1 250px; 
-            }
-            
-            form select { 
-                flex: 2 1 200px; 
-            }
+        form input:focus, form select:focus {
+            outline: none;
+            border-color: var(--leaf);
+            box-shadow: 0 0 0 3px rgba(46, 125, 50, 0.1);
+        }
+        
+        form input::placeholder {
+            color: var(--muted);
         }
         
         form select {
-            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7a6d' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
-            background-position: right 12px center;
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23718096' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
+            background-position: right 14px center;
             background-repeat: no-repeat;
             background-size: 16px;
-            padding-right: 40px;
+            padding-right: 44px;
+            cursor: pointer;
         }
         
-        /* Ocultamos o botão de busca original, pois a busca é ao digitar */
         form button { 
             display: none; 
         }
         
+        /* ====================================================================
+           TABELA DE RESULTADOS
+           ==================================================================== */
+        
         .results-table { 
             width: 100%; 
-            border-collapse: collapse; 
+            border-collapse: separate;
+            border-spacing: 0;
             overflow: hidden; 
-            border-radius: 10px;
+            border-radius: 12px;
             font-size: 14px;
-        }
-        
-        @media (min-width: 768px) {
-            .results-table {
-                font-size: 16px;
-            }
+            background: var(--off-white);
+            box-shadow: var(--shadow-sm);
         }
         
         .results-table th, .results-table td { 
-            border-bottom: 1px solid var(--border); 
-            padding: 12px 8px; 
+            border-bottom: 1px solid #f1f5f9; 
+            padding: 16px; 
             text-align: left; 
             vertical-align: middle;
             word-wrap: break-word;
         }
         
-        @media (min-width: 768px) {
-            .results-table th, .results-table td {
-                padding: 14px 10px;
-            }
+        .results-table thead {
+            background: linear-gradient(180deg, var(--papaya) 0%, var(--papaya-700) 100%);
         }
         
         .results-table thead th { 
-            background: linear-gradient(180deg, var(--papaya), var(--papaya-700)); 
+            background: transparent;
             color: #fff; 
             font-weight: 700; 
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
             border-bottom: 2px solid var(--papaya-700);
-            font-size: 13px;
+            padding: 18px 16px;
         }
         
-        @media (min-width: 768px) {
-            .results-table thead th {
-                font-size: 16px;
-            }
+        .results-table tbody tr {
+            transition: all 0.2s;
         }
         
-        .results-table tr:hover { 
-            background-color: #f9fbf8; 
+        .results-table tbody tr:hover { 
+            background-color: #f8fafc; 
+            transform: scale(1.01);
         }
         
+        .results-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+        
+        /* Colunas específicas */
         .setor-col { 
             white-space: nowrap;
             font-weight: 600;
             color: var(--leaf);
-        }
-        
-        .no-wrap { 
-            white-space: nowrap; 
         }
         
         .ramal-col { 
@@ -345,187 +457,193 @@ if (!$is_ajax):
             white-space: nowrap;
         }
         
-        @media (min-width: 768px) {
-            .ramal-col {
-                width: 120px;
-            }
-        }
-        
-        .results-table th.ramal-col { 
-            text-align: left; 
-        }
-        
         .acoes-col { 
             text-align: center; 
             width: 80px;
         }
         
         @media (min-width: 768px) {
+            .results-table {
+                font-size: 15px;
+            }
+            .results-table thead th {
+                font-size: 13px;
+            }
+            .ramal-col {
+                width: 120px;
+            }
             .acoes-col {
                 width: 110px;
             }
         }
         
+        /* ====================================================================
+           BOTÕES E AÇÕES
+           ==================================================================== */
+        
         .btn-copiar { 
-            background: var(--leaf); 
+            background: linear-gradient(135deg, var(--leaf) 0%, var(--leaf-700) 100%);
             color: #fff; 
             border: none; 
-            padding: 10px 14px; 
-            font-size: 12px; 
+            padding: 10px 18px; 
+            font-size: 13px; 
+            font-weight: 600;
             border-radius: 8px; 
             cursor: pointer; 
-            transition: filter .2s, transform .06s; 
-            box-shadow: 0 2px 6px rgba(46,125,50,0.25);
-            min-width: 60px;
+            transition: all 0.2s; 
+            box-shadow: 0 2px 8px rgba(46,125,50,0.3);
+            min-width: 80px;
             touch-action: manipulation;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        
+        .btn-copiar:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(46,125,50,0.4);
+        }
+        
+        .btn-copiar:active { 
+            transform: translateY(0); 
+        }
+        
+        .btn-copiar.copiado { 
+            background: linear-gradient(135deg, var(--papaya) 0%, var(--papaya-700) 100%);
+            box-shadow: 0 2px 8px rgba(255,106,42,0.3);
         }
         
         @media (min-width: 768px) {
             .btn-copiar {
-                padding: 8px 12px;
-                min-width: auto;
+                padding: 8px 16px;
+                min-width: 90px;
             }
         }
         
-        .btn-copiar:hover { 
-            filter: brightness(1.05); 
-        }
-        
-        .btn-copiar:active { 
-            transform: translateY(1px); 
-        }
-        
-        .btn-copiar.copiado { 
-            background: var(--papaya-700); 
+        /* ====================================================================
+           MENSAGENS E FEEDBACK
+           ==================================================================== */
+        .results-info { 
+            text-align: center; 
+            color: var(--text-light); 
+            margin-bottom: 24px; 
+            font-size: 14px;
+            font-weight: 500;
+            padding: 16px;
+            background: #f8fafc;
+            border-radius: 10px;
+            border: 1px solid var(--border);
         }
         
         .no-results { 
             text-align: center; 
             color: var(--muted); 
             font-size: 16px; 
-            padding: 40px 20px;
+            padding: 60px 20px;
+            background: #f8fafc;
+            border-radius: 12px;
+            border: 2px dashed var(--border);
         }
         
-        @media (min-width: 768px) {
-            .no-results {
-                font-size: 18px;
-                padding: 20px;
-            }
+        .no-results::before {
+            content: "🔍";
+            font-size: 48px;
+            display: block;
+            margin-bottom: 16px;
         }
         
-        .pagination { 
-            text-align: center; 
-            margin-top: 24px; 
-            padding: 16px 0;
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 8px;
+        #content-container {
+            position: relative;
         }
         
-        .pagination a, .pagination span { 
-            display: inline-block; 
-            padding: 10px 14px; 
-            margin: 0; 
-            text-decoration: none; 
-            border: 1px solid var(--border); 
-            border-radius: 10px; 
-            color: var(--papaya-700); 
-            background: #fff; 
-            font-weight: 600;
-            font-size: 14px;
-            min-width: 44px;
-            text-align: center;
-            touch-action: manipulation;
-        }
-        
-        @media (min-width: 768px) {
-            .pagination a, .pagination span {
-                padding: 8px 12px;
-                margin: 0 4px;
-                min-width: auto;
-            }
-        }
-        
-        .pagination span.current { 
-            background: var(--papaya-700); 
-            color: #fff; 
-            border-color: var(--papaya-700); 
-        }
-        
-        .pagination a:hover { 
-            background-color: #eef6ee; 
-        }
-        
-        .pagination a.disabled { 
-            color: #9fb2a1; 
-            pointer-events: none; 
-        }
-        
-        .results-info { 
-            text-align: center; 
-            color: var(--muted); 
-            margin-bottom: 16px; 
-            font-size: 13px;
-            padding: 0 8px;
+        #content-container.loading { 
+            opacity: 0.6; 
+            transition: opacity 0.3s;
+            pointer-events: none;
         }
         
         @media (min-width: 768px) {
             .results-info {
-                font-size: 14px;
-                padding: 0;
+                font-size: 15px;
+            }
+            .no-results {
+                font-size: 18px;
+                padding: 80px 40px;
             }
         }
         
-        #content-container.loading { 
-            opacity: 0.5; 
-            transition: opacity 0.3s; 
+        /* ====================================================================
+           PAGINAÇÃO
+           ==================================================================== */
+        .pagination { 
+            text-align: center; 
+            margin-top: 32px; 
+            padding: 20px 0;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
         }
         
-        /* Mobile-specific optimizations */
-        @media (max-width: 767px) {
-            /* Hide less important columns on mobile */
-            .results-table .sub-setor-col {
-                display: none;
-            }
-            
-            /* Make description column more readable */
-            .results-table .descricao-col {
-                max-width: 0;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                white-space: nowrap;
-            }
-            
-            /* Optimize table for mobile */
-            .results-table {
-                font-size: 13px;
-            }
-            
-            .results-table th, .results-table td {
-                padding: 10px 6px;
-            }
-            
-            /* Make buttons easier to tap */
-            .btn-copiar {
-                padding: 12px 16px;
-                font-size: 13px;
-                min-width: 70px;
-            }
-            
-            /* Optimize pagination for mobile */
-            .pagination {
-                gap: 6px;
-            }
-            
+        .pagination a, .pagination span { 
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 16px; 
+            margin: 0; 
+            text-decoration: none; 
+            border: 2px solid var(--border); 
+            border-radius: 10px; 
+            color: var(--text-light); 
+            background: var(--off-white); 
+            font-weight: 600;
+            font-size: 14px;
+            min-width: 44px;
+            height: 44px;
+            text-align: center;
+            touch-action: manipulation;
+            transition: all 0.2s;
+        }
+        
+        .pagination span.current { 
+            background: linear-gradient(135deg, var(--papaya) 0%, var(--papaya-700) 100%); 
+            color: #fff; 
+            border-color: var(--papaya-700);
+            box-shadow: 0 2px 8px rgba(255,106,42,0.3);
+        }
+        
+        .pagination a:hover { 
+            background-color: #f8fafc;
+            border-color: var(--leaf);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-sm);
+        }
+        
+        .pagination a.disabled { 
+            color: #cbd5e0; 
+            border-color: #e2e8f0;
+            pointer-events: none; 
+            opacity: 0.5;
+        }
+        
+        @media (min-width: 768px) {
             .pagination a, .pagination span {
-                padding: 12px 10px;
-                font-size: 13px;
-                min-width: 50px;
+                padding: 10px 14px;
+                margin: 0 2px;
+                min-width: 44px;
             }
         }
         
-        /* Loading animation */
+        /* ====================================================================
+           ANIMAÇÕES
+           ==================================================================== */
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
         .loading-spinner {
             display: inline-block;
             width: 20px;
@@ -537,31 +655,83 @@ if (!$is_ajax):
             margin-right: 10px;
         }
         
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
+        /* ====================================================================
+           RESPONSIVIDADE - MOBILE
+           ==================================================================== */
         
-        /* Mobile card layout alternative */
         @media (max-width: 767px) {
+            /* Esconde colunas menos importantes */
+            .results-table .sub-setor-col {
+                display: none;
+            }
+            
+            /* Otimiza coluna de descrição */
+            .results-table .descricao-col {
+                max-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            
+            /* Otimiza tabela */
+            .results-table {
+                font-size: 13px;
+            }
+            
+            .results-table th, .results-table td {
+                padding: 10px 6px;
+            }
+            
+            /* Botões mais fáceis de tocar */
+            .btn-copiar {
+                padding: 12px 16px;
+                font-size: 13px;
+                min-width: 70px;
+            }
+            
+            /* Paginação otimizada */
+            .pagination {
+                gap: 6px;
+            }
+            
+            .pagination a, .pagination span {
+                padding: 12px 10px;
+                font-size: 13px;
+                min-width: 50px;
+            }
+            
+            /* Cards mobile */
             .mobile-card {
                 display: block;
             }
             
+            .desktop-table {
+                display: none;
+            }
+            
             .mobile-card .card {
-                background: #fff;
-                border: 1px solid var(--border);
+                background: var(--off-white);
+                border: 2px solid var(--border);
                 border-radius: 12px;
-                padding: 16px;
-                margin-bottom: 12px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                padding: 20px;
+                margin-bottom: 16px;
+                box-shadow: var(--shadow-sm);
+                transition: all 0.2s;
+            }
+            
+            .mobile-card .card:hover {
+                box-shadow: var(--shadow-md);
+                transform: translateY(-2px);
+                border-color: var(--leaf);
             }
             
             .mobile-card .card-header {
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
-                margin-bottom: 8px;
+                margin-bottom: 12px;
+                padding-bottom: 12px;
+                border-bottom: 2px solid #f1f5f9;
             }
             
             .mobile-card .card-title {
@@ -569,43 +739,45 @@ if (!$is_ajax):
                 color: var(--leaf);
                 font-size: 14px;
                 margin: 0;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
             }
             
             .mobile-card .card-ramal {
                 font-weight: 700;
                 color: var(--leaf);
-                font-size: 16px;
+                font-size: 20px;
+                background: var(--leaf-light);
+                padding: 6px 12px;
+                border-radius: 8px;
             }
             
             .mobile-card .card-content {
-                margin-bottom: 12px;
+                margin-bottom: 16px;
             }
             
             .mobile-card .card-description {
                 color: var(--text);
-                font-size: 13px;
-                line-height: 1.4;
+                font-size: 15px;
+                line-height: 1.5;
+                font-weight: 500;
+                margin-bottom: 8px;
             }
             
             .mobile-card .card-subsetor {
                 color: var(--muted);
-                font-size: 12px;
-                margin-top: 4px;
+                font-size: 13px;
+                font-weight: 500;
             }
             
             .mobile-card .card-actions {
                 text-align: right;
+                padding-top: 12px;
+                border-top: 1px solid #f1f5f9;
             }
         }
         
-        /* Hide desktop table on mobile */
-        @media (max-width: 767px) {
-            .desktop-table {
-                display: none;
-            }
-        }
-        
-        /* Hide mobile cards on desktop */
+        /* Esconde cards mobile no desktop */
         @media (min-width: 768px) {
             .mobile-card {
                 display: none;
@@ -616,32 +788,43 @@ if (!$is_ajax):
 <body>
     <div class="container">
         <div class="header-container">
-            <img src="logo-sgra2.png" alt="Logo São Gonçalo do Rio Abaixo" class="logo">
-            <h1>Consulta de Ramais</h1>
-            <div style="position:absolute; right:0; top:50%; transform: translateY(-50%); display:flex; gap:8px;">
+            <div class="logo-section">
+                <img src="logo-sgra2.png" alt="Logo São Gonçalo do Rio Abaixo" class="logo">
+                <h1>Consulta de Ramais</h1>
+            </div>
+            <div class="header-actions">
                 <?php if (!empty($_SESSION['is_admin'])): ?>
-                    <a href="./admin.php" style="text-decoration:none; background: var(--leaf); color:#fff; padding:10px 14px; border-radius:8px; font-weight:600; font-size:14px;">Painel</a>
-                    <a href="./logout.php" style="text-decoration:none; background: #b00020; color:#fff; padding:10px 14px; border-radius:8px; font-weight:600; font-size:14px;">Sair</a>
+                    <a href="./admin.php">Painel</a>
+                    <a href="./logout.php">Sair</a>
                 <?php else: ?>
-                    <a href="./admin.php" style="text-decoration:none; background: var(--papaya-700); color:#fff; padding:10px 14px; border-radius:8px; font-weight:700; font-size:14px;">Admin</a>
+                    <a href="./admin.php">Admin</a>
                 <?php endif; ?>
             </div>
         </div>
         
-        <form id="search-form" action="" method="GET">
-            <input type="text" id="busca-input" name="busca" placeholder="Digite para buscar..." value="<?= htmlspecialchars($termo_busca) ?>">
-            <select id="setor-select" name="setor">
-                <option value="todos">Todos os Setores</option>
-                <?php foreach ($lista_setores as $setor): ?>
-                    <option value="<?= $setor ?>" <?= ($setor_busca == $setor ? 'selected' : '') ?>>
-                        <?= ucfirst(str_replace('_', ' ', $setor)) ?>
-                    </option>
-                <?php endforeach; ?>
-            </select>
-            <button type="submit">Buscar</button>
-        </form>
+        <div class="search-section">
+            <form id="search-form" action="" method="GET">
+                <div class="form-group">
+                    <label for="busca-input">🔍 Buscar</label>
+                    <input type="text" id="busca-input" name="busca" placeholder="Digite nome, ramal ou descrição..." value="<?= h($termo_busca) ?>">
+                </div>
+                <div class="form-group">
+                    <label for="setor-select">📂 Setor</label>
+                    <select id="setor-select" name="setor">
+                        <option value="todos">Todos os Setores</option>
+                        <?php foreach ($lista_setores as $setor): ?>
+                            <option value="<?= h($setor) ?>" <?= ($setor_busca == $setor ? 'selected' : '') ?>>
+                                <?= formatar_nome_setor($setor) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <button type="submit" style="display:none">Buscar</button>
+            </form>
+        </div>
 
-        <div id="content-container">
+        <div class="content-section">
+            <div id="content-container">
 <?php 
 endif; // FIM DO BLOCO IF(!$is_ajax)
 
@@ -650,109 +833,118 @@ endif; // FIM DO BLOCO IF(!$is_ajax)
 // =======================================================================================
 ?>
             <div class="results-container">
-                <?php if ($form_enviado): ?>
-                    <?php if (!empty($todos_os_resultados)): ?>
-                        <div class="results-info">
-                            Mostrando <?= count($todos_os_resultados) ?> de <?= $total_resultados ?> resultados
-                            (Página <?= $pagina_atual ?> de <?= $total_paginas ?>)
-                        </div>
-                        
-                        <!-- Desktop Table -->
-                        <table class="results-table desktop-table">
-                            <thead>
-                                <tr>
-                                    <th class="setor-col">Setor</th>
-                                    <th class="sub-setor-col">Sub-setor</th>
-                                    <th class="descricao-col">Descrição / Falar com</th>
-                                    <th class="ramal-col">Ramal</th>
-                                    <th class="acoes-col">Ações</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($todos_os_resultados as $linha): ?>
-                                    <?php
-                                    $falar_com = htmlspecialchars($linha['falar_com'] ?? '');
-                                    $descricao = htmlspecialchars($linha['descricao'] ?? '');
-                                    if (!empty($falar_com) && !empty($descricao)) {
-                                        $contato = $falar_com . ' (' . $descricao . ')';
-                                    } elseif (!empty($falar_com)) {
-                                        $contato = $falar_com;
-                                    } else {
-                                        $contato = $descricao;
-                                    }
-                                    ?>
-                                    <tr>
-                                        <td class="setor-col"><?= ucfirst(str_replace('_', ' ', htmlspecialchars($linha['setor']))) ?></td>
-                                        <td class="sub-setor-col"><?= htmlspecialchars($linha['sub_setor'] ?? 'Geral') ?></td>
-                                        <td class="descricao-col"><?= $contato ?></td>
-                                        <td class="ramal-col"><?= htmlspecialchars($linha['ramal']) ?></td>
-                                        <td class="acoes-col">
-                                            <button class="btn-copiar" data-ramal="<?= htmlspecialchars($linha['ramal']) ?>">
-                                                Copiar
-                                            </button>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                        
-                        <!-- Mobile Cards -->
-                        <div class="mobile-card">
+                <?php if (!empty($todos_os_resultados)): ?>
+                    <div class="results-info">
+                        Mostrando <?= count($todos_os_resultados) ?> de <?= $total_resultados ?> resultados
+                        (Página <?= $pagina_atual ?> de <?= $total_paginas ?>)
+                    </div>
+                    
+                    <!-- Desktop Table -->
+                    <table class="results-table desktop-table">
+                        <thead>
+                            <tr>
+                                <th class="setor-col">Setor</th>
+                                <th class="sub-setor-col">Sub-setor</th>
+                                <th class="descricao-col">Descrição / Falar com</th>
+                                <th class="ramal-col">Ramal</th>
+                                <th class="acoes-col">Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody>
                             <?php foreach ($todos_os_resultados as $linha): ?>
-                                <?php
-                                $falar_com = htmlspecialchars($linha['falar_com'] ?? '');
-                                $descricao = htmlspecialchars($linha['descricao'] ?? '');
-                                if (!empty($falar_com) && !empty($descricao)) {
-                                    $contato = $falar_com . ' (' . $descricao . ')';
-                                } elseif (!empty($falar_com)) {
-                                    $contato = $falar_com;
-                                } else {
-                                    $contato = $descricao;
-                                }
-                                ?>
-                                <div class="card">
-                                    <div class="card-header">
-                                        <h3 class="card-title"><?= ucfirst(str_replace('_', ' ', htmlspecialchars($linha['setor']))) ?></h3>
-                                        <span class="card-ramal"><?= htmlspecialchars($linha['ramal']) ?></span>
-                                    </div>
-                                    <div class="card-content">
-                                        <div class="card-description"><?= $contato ?></div>
-                                        <div class="card-subsetor"><?= htmlspecialchars($linha['sub_setor'] ?? 'Geral') ?></div>
-                                    </div>
-                                    <div class="card-actions">
-                                        <button class="btn-copiar" data-ramal="<?= htmlspecialchars($linha['ramal']) ?>">
-                                            Copiar
+                                <tr>
+                                    <td class="setor-col"><?= formatar_nome_setor($linha['setor']) ?></td>
+                                    <td class="sub-setor-col"><?= h(formatar_sub_setor($linha['sub_setor'] ?? null)) ?></td>
+                                    <td class="descricao-col"><?= h(formatar_contato($linha)) ?></td>
+                                    <td class="ramal-col"><?= h($linha['ramal']) ?></td>
+                                    <td class="acoes-col">
+                                        <button class="btn-copiar" data-ramal="<?= h($linha['ramal']) ?>">
+                                            📋 Copiar
                                         </button>
-                                    </div>
-                                </div>
+                                    </td>
+                                </tr>
                             <?php endforeach; ?>
-                        </div>
-                        
-                        <?php if ($total_paginas > 1): ?>
-                            <div class="pagination">
-                                <?php
-                                    $params = $_GET;
-                                    // Links da paginação (código sem alteração)...
-                                    if ($pagina_atual > 1): ?> <a href="?<?= http_build_query(array_merge($params, ['pagina' => 1])) ?>">Primeira</a> <?php else: ?> <span class="disabled">Primeira</span> <?php endif;
-                                    if ($pagina_atual > 1): ?> <a href="?<?= http_build_query(array_merge($params, ['pagina' => $pagina_atual - 1])) ?>">Anterior</a> <?php else: ?> <span class="disabled">Anterior</span> <?php endif;
-                                    $inicio = max(1, $pagina_atual - 2); $fim = min($total_paginas, $pagina_atual + 2);
-                                    for ($i = $inicio; $i <= $fim; $i++): if ($i == $pagina_atual): ?> <span class="current"><?= $i ?></span> <?php else: ?> <a href="?<?= http_build_query(array_merge($params, ['pagina' => $i])) ?>"><?= $i ?></a> <?php endif; endfor;
-                                    if ($pagina_atual < $total_paginas): ?> <a href="?<?= http_build_query(array_merge($params, ['pagina' => $pagina_atual + 1])) ?>">Próxima</a> <?php else: ?> <span class="disabled">Próxima</span> <?php endif;
-                                    if ($pagina_atual < $total_paginas): ?> <a href="?<?= http_build_query(array_merge($params, ['pagina' => $total_paginas])) ?>">Última</a> <?php else: ?> <span class="disabled">Última</span> <?php endif;
-                                ?>
+                        </tbody>
+                    </table>
+                    
+                    <!-- Mobile Cards -->
+                    <div class="mobile-card">
+                        <?php foreach ($todos_os_resultados as $linha): ?>
+                            <div class="card">
+                                <div class="card-header">
+                                    <h3 class="card-title"><?= formatar_nome_setor($linha['setor']) ?></h3>
+                                    <span class="card-ramal"><?= h($linha['ramal']) ?></span>
+                                </div>
+                                <div class="card-content">
+                                    <div class="card-description"><?= h(formatar_contato($linha)) ?></div>
+                                    <div class="card-subsetor"><?= h(formatar_sub_setor($linha['sub_setor'] ?? null)) ?></div>
+                                </div>
+                                <div class="card-actions">
+                                    <button class="btn-copiar" data-ramal="<?= h($linha['ramal']) ?>">
+                                        📋 Copiar Ramal
+                                    </button>
+                                </div>
                             </div>
-                        <?php endif; ?>
-                        
-                    <?php else: ?>
-                        <p class="no-results">Nenhum resultado encontrado.</p>
+                        <?php endforeach; ?>
+                    </div>
+                    
+                    <?php if ($total_paginas > 1): ?>
+                        <div class="pagination">
+                            <?php
+                                $params = $_GET;
+                                
+                                // Primeira página
+                                if ($pagina_atual > 1): 
+                                    ?><a href="?<?= http_build_query(array_merge($params, ['pagina' => 1])) ?>">Primeira</a><?php
+                                else: 
+                                    ?><span class="disabled">Primeira</span><?php
+                                endif;
+                                
+                                // Página anterior
+                                if ($pagina_atual > 1): 
+                                    ?><a href="?<?= http_build_query(array_merge($params, ['pagina' => $pagina_atual - 1])) ?>">Anterior</a><?php
+                                else: 
+                                    ?><span class="disabled">Anterior</span><?php
+                                endif;
+                                
+                                // Números das páginas
+                                $inicio = max(1, $pagina_atual - 2);
+                                $fim = min($total_paginas, $pagina_atual + 2);
+                                for ($i = $inicio; $i <= $fim; $i++): 
+                                    if ($i == $pagina_atual): 
+                                        ?><span class="current"><?= $i ?></span><?php
+                                    else: 
+                                        ?><a href="?<?= http_build_query(array_merge($params, ['pagina' => $i])) ?>"><?= $i ?></a><?php
+                                    endif;
+                                endfor;
+                                
+                                // Próxima página
+                                if ($pagina_atual < $total_paginas): 
+                                    ?><a href="?<?= http_build_query(array_merge($params, ['pagina' => $pagina_atual + 1])) ?>">Próxima</a><?php
+                                else: 
+                                    ?><span class="disabled">Próxima</span><?php
+                                endif;
+                                
+                                // Última página
+                                if ($pagina_atual < $total_paginas): 
+                                    ?><a href="?<?= http_build_query(array_merge($params, ['pagina' => $total_paginas])) ?>">Última</a><?php
+                                else: 
+                                    ?><span class="disabled">Última</span><?php
+                                endif;
+                            ?>
+                        </div>
                     <?php endif; ?>
+                <?php else: ?>
+                    <p class="no-results">Nenhum resultado encontrado.</p>
                 <?php endif; ?>
             </div>
+        </div>
+    </div>
 <?php
 // SE NÃO FOR AJAX, RENDERIZA O RESTANTE DA PÁGINA E O JAVASCRIPT
 if (!$is_ajax):
 ?>
-        </div> </div> <script>
+<script>
     document.addEventListener('DOMContentLoaded', function() {
         
         const buscaInput = document.getElementById('busca-input');
@@ -760,27 +952,26 @@ if (!$is_ajax):
         const contentContainer = document.getElementById('content-container');
         let debounceTimer;
 
-        // Função principal que executa a busca
+        /**
+         * Executa a busca com os parâmetros atuais
+         * @param {number} page - Número da página (padrão: 1)
+         */
         function performSearch(page = 1) {
             const termoBusca = buscaInput.value;
             const setorBusca = setorSelect.value;
             
-            // Adiciona um efeito visual de carregamento
             contentContainer.classList.add('loading');
 
-            // Constrói a URL para a requisição AJAX
             const params = new URLSearchParams({
                 busca: termoBusca,
                 setor: setorBusca,
                 pagina: page,
-                ajax: 1 // Parâmetro essencial para o PHP saber que é um live search
+                ajax: 1
             });
 
-            // Atualiza a URL no navegador do usuário sem recarregar a página
             const url = window.location.pathname + '?' + params.toString().replace('ajax=1', '').replace(/&$/, '');
             window.history.pushState({ path: url }, '', url);
             
-            // Faz a requisição ao servidor
             fetch(window.location.pathname + '?' + params.toString())
                 .then(response => response.text())
                 .then(html => {
@@ -794,37 +985,35 @@ if (!$is_ajax):
                 });
         }
 
-        // Evento de digitação no campo de busca (com delay para não sobrecarregar)
+        // Busca com debounce para evitar requisições excessivas
         buscaInput.addEventListener('keyup', function() {
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(() => {
-                performSearch(1); // Sempre volta para a primeira página ao digitar
-            }, 400); // Delay de 400ms
+                performSearch(1);
+            }, 400);
         });
 
-        // Evento de mudança no seletor de setor
+        // Busca ao mudar setor
         setorSelect.addEventListener('change', function() {
-            performSearch(1); // Sempre volta para a primeira página ao mudar o setor
+            performSearch(1);
         });
 
-        // Delegação de eventos para os cliques na paginação e no botão de copiar
+        // Delegação de eventos para paginação e cópia
         document.addEventListener('click', function(e) {
-            // Lógica para a paginação AJAX
+            // Paginação AJAX
             const pageLink = e.target.closest('.pagination a');
             if (pageLink) {
-                e.preventDefault(); // Impede o link de recarregar a página
+                e.preventDefault();
                 const url = new URL(pageLink.href);
                 const page = url.searchParams.get('pagina') || 1;
                 performSearch(page);
-                return; // Encerra para não conflitar com a lógica de cópia
+                return;
             }
 
-            // Lógica para copiar o ramal (já existente)
+            // Cópia de ramal
             const copyButton = e.target.closest('.btn-copiar');
             if (copyButton) {
                 const ramal = copyButton.getAttribute('data-ramal') || '';
-                
-                // Melhorar feedback visual para mobile
                 const originalText = copyButton.innerText;
                 copyButton.innerText = 'Copiado!';
                 copyButton.classList.add('copiado');
@@ -919,7 +1108,7 @@ if (!$is_ajax):
     div.style.position = "fixed";
     div.style.bottom = "20px";
     div.style.left = "20px";
-    div.style.background = "#fff";
+    div.style.background = "#fafafa";
     div.style.padding = "15px";
     div.style.border = "1px solid #ccc";
     div.style.borderRadius = "8px";
