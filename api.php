@@ -8,7 +8,7 @@ header('Content-Type: application/json');
 require_once __DIR__ . '/config.php';
 
 // Inicia a sessão para verificar a autenticação do administrador
-session_start();
+start_app_session();
 
 // Garante que apenas administradores autenticados possam acessar esta API
 if (empty($_SESSION['is_admin'])) {
@@ -49,6 +49,13 @@ $id = (int)$data['id'];
 $field = $data['field'];
 $value = $data['value'];
 
+// CSRF (obrigatório para alterações via Admin)
+if (!verify_csrf_token($data['csrf_token'] ?? null)) {
+	http_response_code(403);
+	echo json_encode(['success' => false, 'message' => 'CSRF inválido. Recarregue a página e tente novamente.']);
+	exit;
+}
+
 // Lista dos campos permitidos para alteração para evitar injeção de SQL
 $allowed_fields = ['emergencia', 'oculto', 'principal'];
 if (!in_array($field, $allowed_fields, true)) {
@@ -60,6 +67,14 @@ if (!in_array($field, $allowed_fields, true)) {
 
 // Conecta-se ao banco de dados
 $con = get_db_connection();
+
+// Valida a tabela (evita injeção via nome de tabela)
+$tabelas_permitidas = get_lista_setores($con);
+if (!in_array($tabela, $tabelas_permitidas, true)) {
+	http_response_code(400);
+	echo json_encode(['success' => false, 'message' => 'Tabela inválida.']);
+	exit;
+}
 
 // Inicia uma transação para garantir a integridade dos dados
 // Se algo der errado, todas as alterações são desfeitas

@@ -4,8 +4,9 @@
  * Acesse via navegador quando estiver logado como admin
  */
 
-session_start();
 require_once __DIR__ . '/config.php';
+start_app_session();
+$csrf_token = get_csrf_token();
 
 // Verifica se é admin
 if (empty($_SESSION['is_admin'])) {
@@ -20,6 +21,10 @@ $mensagem = '';
 $tipo_mensagem = 'info';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['importar'])) {
+	if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+		$mensagem = '❌ Token CSRF inválido. Recarregue a página e tente novamente.';
+		$tipo_mensagem = 'error';
+	} else {
     // Carrega dados do arquivo HTML
     $arquivo = __DIR__ . '/emails.html';
     if (!file_exists($arquivo)) {
@@ -81,6 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['importar'])) {
             $tipo_mensagem = 'error';
         }
     }
+	}
 }
 
 // Verifica quantos emails já existem
@@ -95,6 +101,8 @@ $con->close();
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Importar Emails - Admin</title>
+    <link rel="icon" type="image/png" href="<?= BASE_PATH ?>/ico.png">
+    <link rel="apple-touch-icon" href="<?= BASE_PATH ?>/ico.png">
     <link rel="stylesheet" href="./assets/css/styles.css">
     <style>
         body {
@@ -176,6 +184,7 @@ $con->close();
         
         <form method="post">
             <p>Este script irá importar todos os emails do arquivo <code>emails.html</code> para o banco de dados.</p>
+			<input type="hidden" name="csrf_token" value="<?php echo h($csrf_token); ?>">
             <button type="submit" name="importar" value="1">📥 Importar Emails</button>
         </form>
         

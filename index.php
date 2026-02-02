@@ -3,10 +3,10 @@
 // error_reporting(E_ALL);
 // ini_set('display_errors', 1);
 // ini_set('display_startup_errors', 1);
-session_start();
 
 // =================== CONFIGURAÇÕES DO BANCO DE DADOS ===================
 require_once __DIR__ . '/config.php';
+start_app_session();
 // =====================================================================
 
 // DETECTA SE A REQUISIÇÃO É AJAX (CHAVE PARA O LIVE SEARCH)
@@ -25,20 +25,115 @@ $lista_setores = get_lista_setores($conexao);
 $todos_os_resultados = [];
 $termo_busca = trim($_GET['busca'] ?? '');
 $setor_busca = $_GET['setor'] ?? 'todos';
-$tipo_ramal = $_GET['tipo'] ?? 'interno'; // 'interno' ou 'externo'
+$tipo_ramal = $_GET['tipo'] ?? 'interno'; // 'interno' | 'externo' | 'centro'
+$tipos_validos = ['interno', 'externo', 'centro'];
+if (!in_array($tipo_ramal, $tipos_validos, true)) {
+    $tipo_ramal = 'interno';
+}
 $total_resultados = 0;
 $total_paginas = 0;
 $like_termo = "%" . $termo_busca . "%";
 
 // Separar setores internos e externos
 $setores_internos = array_filter($lista_setores, function($s) {
-    return $s !== 'externos';
+    return $s !== 'externos' && $s !== 'centro_administrativo';
 });
 $setores_externos = ['externos'];
+$setores_centro = ['centro_administrativo'];
+
+// =================== CENTRO ADMINISTRATIVO (sub-setor como filtro) ===================
+// Neste tipo, o "setor" da URL é usado como filtro de sub_setor, pois a tabela é única.
+$lista_subsetores_centro = [];
+if ($tipo_ramal === 'centro') {
+    garantir_tabela_centro_administrativo($conexao);
+
+    // Lista de sub-setores para o seletor (normaliza vazio/null para "Geral")
+    $res_ss = $conexao->query("SELECT DISTINCT COALESCE(NULLIF(TRIM(sub_setor), ''), 'Geral') AS ss FROM centro_administrativo ORDER BY ss");
+    if ($res_ss) {
+        while ($row = $res_ss->fetch_assoc()) {
+            $ss = trim((string)($row['ss'] ?? ''));
+            if ($ss !== '') $lista_subsetores_centro[] = $ss;
+        }
+        $res_ss->free();
+    }
+
+    // Filtro selecionado no combo (via param setor)
+    $subsetor_busca = $setor_busca; // reutiliza o mesmo param para manter JS/AJAX
+
+    // Monta WHERE
+    $where = [];
+    $params = [];
+    $types = '';
+
+    // Não mostrar ocultos
+    $where[] = "oculto = 0";
+
+    // Filtro por sub_setor (se não for "todos")
+    if ($subsetor_busca !== 'todos') {
+        if ($subsetor_busca === 'Geral') {
+            $where[] = "(sub_setor IS NULL OR TRIM(sub_setor) = '')";
+        } else {
+            $where[] = "sub_setor = ?";
+            $params[] = $subsetor_busca;
+            $types .= 's';
+        }
+    }
+
+    // Busca textual
+    if (!empty($termo_busca)) {
+        $where[] = "(COALESCE(descricao,'') LIKE ? OR COALESCE(falar_com,'') LIKE ? OR COALESCE(ramal,'') LIKE ? OR COALESCE(sub_setor,'') LIKE ?)";
+        for ($i = 0; $i < 4; $i++) $params[] = $like_termo;
+        $types .= 'ssss';
+    }
+
+    $where_sql = !empty($where) ? ('WHERE ' . implode(' AND ', $where)) : '';
+
+    // Total
+    $sql_count = "SELECT COUNT(*) AS total FROM centro_administrativo $where_sql";
+    $stmt_count = $conexao->prepare($sql_count);
+    if (!empty($params)) $stmt_count->bind_param($types, ...$params);
+    $stmt_count->execute();
+    $total_resultados = intval($stmt_count->get_result()->fetch_assoc()['total'] ?? 0);
+    $total_paginas = ($total_resultados > 0) ? ceil($total_resultados / $itens_por_pagina) : 0;
+    $stmt_count->close();
+
+    // Página
+    if ($total_resultados > 0) {
+        $sql_sel = "SELECT id, sub_setor, descricao, falar_com, ramal, emergencia, oculto, principal, 'centro_administrativo' as setor
+                    FROM centro_administrativo
+                    $where_sql
+                    ORDER BY principal DESC, emergencia DESC, sub_setor, descricao
+                    LIMIT ? OFFSET ?";
+        $stmt_sel = $conexao->prepare($sql_sel);
+        $types_sel = $types . 'ii';
+        $params_sel = array_merge($params, [$itens_por_pagina, $offset]);
+        $stmt_sel->bind_param($types_sel, ...$params_sel);
+        $stmt_sel->execute();
+        $res = $stmt_sel->get_result();
+        while ($linha = $res->fetch_assoc()) $todos_os_resultados[] = $linha;
+        $stmt_sel->close();
+    }
+
+    $conexao->close();
+} else {
 
 // Função para verificar se uma coluna existe em uma tabela
 function coluna_existe(mysqli $con, string $tabela, string $coluna): bool {
-    $result = $con->query("SHOW COLUMNS FROM `$tabela` LIKE '$coluna'");
+    // Sanitiza o nome da tabela e coluna removendo caracteres não alfanuméricos (exceto underscore)
+    $tabela = preg_replace('/[^a-zA-Z0-9_]/', '', $tabela);
+    $coluna = preg_replace('/[^a-zA-Z0-9_]/', '', $coluna);
+    
+    if (empty($tabela) || empty($coluna)) {
+        return false;
+    }
+    
+    // Escapa o nome da coluna para segurança adicional
+    $coluna_escaped = $con->real_escape_string($coluna);
+    
+    // Query direta com escape (tabela já foi sanitizada e validada)
+    $query = "SHOW COLUMNS FROM `$tabela` LIKE '$coluna_escaped'";
+    $result = $con->query($query);
+    
     return $result && $result->num_rows > 0;
 }
 
@@ -179,7 +274,8 @@ if (!empty($queries)) {
     
     // Busca resultados paginados
     if ($total_resultados > 0) {
-        $sql_paginado = $sql_base . " ORDER BY setor, sub_setor, descricao LIMIT ? OFFSET ?";
+        // Prioriza ramais principais no topo (depois emergência) e mantém ordenação estável
+        $sql_paginado = $sql_base . " ORDER BY principal DESC, emergencia DESC, setor, sub_setor, descricao LIMIT ? OFFSET ?";
         $stmt_paginado = $conexao->prepare($sql_paginado);
         
         if (!empty($termo_busca) && !empty($params_count)) {
@@ -200,6 +296,7 @@ if (!empty($queries)) {
 }
 
 $conexao->close();
+} // FIM do else (interno/externo)
 
 // SE NÃO FOR AJAX, RENDERIZA O CABEÇALHO E TOPO DA PÁGINA
 if (!$is_ajax): 
@@ -213,6 +310,8 @@ if (!$is_ajax):
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>Consulta de Ramais</title>
+    <link rel="icon" type="image/png" href="<?= BASE_PATH ?>/ico.png">
+    <link rel="apple-touch-icon" href="<?= BASE_PATH ?>/ico.png">
     <link rel="manifest" href="<?= BASE_PATH ?>/manifest.json">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -243,12 +342,17 @@ if (!$is_ajax):
                 <a href="?tipo=interno<?= !empty($termo_busca) ? '&busca=' . urlencode($termo_busca) : '' ?><?= $setor_busca != 'todos' ? '&setor=' . urlencode($setor_busca) : '' ?>" 
                    class="tab-link <?= $tipo_ramal === 'interno' ? 'active' : '' ?>" 
                    style="flex: 1; padding: 16px 24px; text-align: center; text-decoration: none; color: <?= $tipo_ramal === 'interno' ? '#2e7d32' : '#718096' ?>; font-weight: <?= $tipo_ramal === 'interno' ? '600' : '500' ?>; border-bottom: 3px solid <?= $tipo_ramal === 'interno' ? '#2e7d32' : 'transparent' ?>; transition: all 0.2s;">
-                    🏢 Ramais Internos
+                    🏢 Ramais Externos
+                </a>
+                <a href="?tipo=centro<?= !empty($termo_busca) ? '&busca=' . urlencode($termo_busca) : '' ?><?= $setor_busca != 'todos' ? '&setor=' . urlencode($setor_busca) : '' ?>" 
+                   class="tab-link <?= $tipo_ramal === 'centro' ? 'active' : '' ?>" 
+                   style="flex: 1; padding: 16px 24px; text-align: center; text-decoration: none; color: <?= $tipo_ramal === 'centro' ? '#2e7d32' : '#718096' ?>; font-weight: <?= $tipo_ramal === 'centro' ? '600' : '500' ?>; border-bottom: 3px solid <?= $tipo_ramal === 'centro' ? '#2e7d32' : 'transparent' ?>; transition: all 0.2s;">
+                    🏛️ Centro Administrativo
                 </a>
                 <a href="?tipo=externo<?= !empty($termo_busca) ? '&busca=' . urlencode($termo_busca) : '' ?><?= $setor_busca != 'todos' ? '&setor=' . urlencode($setor_busca) : '' ?>" 
                    class="tab-link <?= $tipo_ramal === 'externo' ? 'active' : '' ?>" 
                    style="flex: 1; padding: 16px 24px; text-align: center; text-decoration: none; color: <?= $tipo_ramal === 'externo' ? '#2e7d32' : '#718096' ?>; font-weight: <?= $tipo_ramal === 'externo' ? '600' : '500' ?>; border-bottom: 3px solid <?= $tipo_ramal === 'externo' ? '#2e7d32' : 'transparent' ?>; transition: all 0.2s;">
-                    📞 Ramais Externos
+                    📞 Telefones Externos
                 </a>
             </div>
         </div>
@@ -261,17 +365,29 @@ if (!$is_ajax):
                     <input type="text" id="busca-input" name="busca" placeholder="Digite nome, ramal ou descrição..." value="<?= h($termo_busca) ?>">
                 </div>
                 <div class="form-group">
-                    <label for="setor-select">📂 Setor</label>
+                    <label for="setor-select">📂 <?= ($tipo_ramal === 'centro') ? 'Sub-setor' : 'Setor' ?></label>
                     <select id="setor-select" name="setor">
                         <option value="todos">Todos os Setores</option>
                         <?php 
-                        $setores_para_exibir = ($tipo_ramal === 'externo') ? $setores_externos : $setores_internos;
-                        foreach ($setores_para_exibir as $setor): 
+                        if ($tipo_ramal === 'centro') {
+                            foreach ($lista_subsetores_centro as $ss):
+                        ?>
+                            <option value="<?= h($ss) ?>" <?= ($setor_busca == $ss ? 'selected' : '') ?>>
+                                <?= h($ss) ?>
+                            </option>
+                        <?php
+                            endforeach;
+                        } else {
+                            $setores_para_exibir = ($tipo_ramal === 'externo') ? $setores_externos : $setores_internos;
+                            foreach ($setores_para_exibir as $setor):
                         ?>
                             <option value="<?= h($setor) ?>" <?= ($setor_busca == $setor ? 'selected' : '') ?>>
                                 <?= formatar_nome_setor($setor) ?>
                             </option>
-                        <?php endforeach; ?>
+                        <?php 
+                            endforeach;
+                        }
+                        ?>
                     </select>
                 </div>
                 <button type="submit" style="display:none">Buscar</button>
@@ -291,6 +407,14 @@ endif; // FIM DO BLOCO IF(!$is_ajax)
             <p style="background: #fff9e6; color: #8c5d00; border-left: 5px solid #ffc107; padding: 16px; margin-bottom: 20px; border-radius: 8px; font-size: 14px; line-height: 1.6; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
                 <strong>Aviso Importante:</strong> Ramais internos <strong>não podem</strong> transferir ligações para ramais externos e vice-versa. As transferências são permitidas apenas entre ramais do mesmo tipo.
             </p>
+            <p style="background: #ffebee; color: #b71c1c; border-left: 5px solid #d32f2f; padding: 16px; margin-bottom: 20px; border-radius: 8px; font-size: 14px; line-height: 1.6; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                <strong>Aviso Temporário:</strong> Temporariamente os novos ramais do <strong>Centro Administrativo</strong> só podem transferir ligações <strong>entre eles</strong>.
+            </p>
+            <?php if ($tipo_ramal === 'centro' && empty($todos_os_resultados)): ?>
+                <p style="background: #eef7ff; color: #0b4f6c; border-left: 5px solid #1976d2; padding: 16px; margin-bottom: 20px; border-radius: 8px; font-size: 14px; line-height: 1.6; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+                    <strong>Centro Administrativo:</strong> esta aba está <strong>vazia</strong> no momento. Você poderá adicionar os ramais aqui posteriormente.
+                </p>
+            <?php endif; ?>
             
             <div class="results-container">
                 <?php if (!empty($todos_os_resultados)): ?>
@@ -305,7 +429,7 @@ endif; // FIM DO BLOCO IF(!$is_ajax)
                             <tr>
                                 <th class="setor-col">Setor</th>
                                 <th class="sub-setor-col">Sub-setor</th>
-                                <th class="descricao-col">Descrição / Falar com</th>
+                                <th class="descricao-col">Falar com / Descrição</th>
                                 <th class="ramal-col">Ramal</th>
                                 <th class="acoes-col">Ações</th>
                             </tr>

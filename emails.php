@@ -3,10 +3,10 @@
 // error_reporting(E_ALL);
 // ini_set('display_errors', 1);
 // ini_set('display_startup_errors', 1);
-session_start();
 
 // =================== CONFIGURAÇÕES ===================
 require_once __DIR__ . '/config.php';
+start_app_session();
 // =====================================================
 
 // DETECTA SE A REQUISIÇÃO É AJAX (CHAVE PARA O LIVE SEARCH)
@@ -101,11 +101,13 @@ if (!$is_ajax):
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <title>Consulta de Emails</title>
-    <link rel="manifest" href="./manifest.json">
+    <link rel="icon" type="image/png" href="<?= BASE_PATH ?>/ico.png">
+    <link rel="apple-touch-icon" href="<?= BASE_PATH ?>/ico.png">
+    <link rel="manifest" href="<?= BASE_PATH ?>/manifest.json">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./assets/css/styles.css">
+    <link rel="stylesheet" href="<?= BASE_PATH ?>/assets/css/styles.css">
     <style>
         .email-link {
             color: #1976d2;
@@ -123,7 +125,7 @@ if (!$is_ajax):
     <div class="container">
         <div class="header-container">
             <div class="logo-section">
-                <img src="logo-sgra2.png" alt="Logo São Gonçalo do Rio Abaixo" class="logo">
+                <img src="<?= BASE_PATH ?>/logo-sgra2.png" alt="Logo São Gonçalo do Rio Abaixo" class="logo">
                 <h1>Consulta de Emails</h1>
             </div>
             <div class="header-actions">

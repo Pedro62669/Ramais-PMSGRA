@@ -3,6 +3,7 @@ const ASSETS = [
   "./",
   "./index.php",
   "./manifest.json",
+  "./ico.png",
   "./icon-192.png",
   "./icon-512.png"
 ];

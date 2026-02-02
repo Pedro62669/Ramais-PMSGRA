@@ -1,10 +1,13 @@
 <?php
-session_start();
 // Evitar cache para a página de login/painel
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
 header('Expires: 0');
 require_once __DIR__ . '/config.php';
+start_app_session();
+
+$csrf_token = get_csrf_token();
+$csrf_error = false;
 
 // Autenticação simples via POST (usuário/senha do ambiente)
 $admin_user = getenv('ADMIN_USER') ?: 'pedro';
@@ -14,6 +17,8 @@ if (isset($_POST['action']) && $_POST['action'] === 'login') {
 	$user = trim($_POST['user'] ?? '');
 	$pass = trim($_POST['pass'] ?? '');
 	if (hash_equals($admin_user, $user) && hash_equals($admin_pass, $pass)) {
+		// Mitiga session fixation
+		session_regenerate_id(true);
 		$_SESSION['is_admin'] = true;
 		header('Location: ./admin.php');
 		exit;
@@ -31,6 +36,8 @@ if (empty($_SESSION['is_admin'])) {
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Login Admin - Ramais</title>
 	<link rel="manifest" href="./manifest.json">
+	<link rel="icon" type="image/png" href="<?= BASE_PATH ?>/ico.png">
+	<link rel="apple-touch-icon" href="<?= BASE_PATH ?>/ico.png">
 	<style>
 		body{font-family:Arial,Helvetica,sans-serif;background:#f5f7f5;margin:0}
 		.wrapper{max-width:400px;margin:60px auto;background:#fff;border:1px solid #e6efe6;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.06);padding:24px}
@@ -47,6 +54,7 @@ if (empty($_SESSION['is_admin'])) {
 		<h1>Acesso Administrativo</h1>
 		<form method="post" action="./admin.php">
 			<input type="hidden" name="action" value="login">
+			<input type="hidden" name="csrf_token" value="<?php echo h($csrf_token); ?>">
 			<input type="text" name="user" placeholder="Usuário" required>
 			<input type="password" name="pass" placeholder="Senha" required>
 			<button type="submit">Entrar</button>
@@ -63,8 +71,26 @@ exit;
 // A partir daqui, usuário autenticado
 $con = get_db_connection();
 
+// Validação CSRF para qualquer POST autenticado (exceto login)
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+	if (!verify_csrf_token($_POST['csrf_token'] ?? null)) {
+		$csrf_error = true;
+	}
+}
+
+// Garantir que o setor Centro Administrativo exista (mesmo vazio) e que apareça na lista de setores
+garantir_tabela_centro_administrativo($con);
+limpar_cache_setores();
+
 // Carregar lista de setores (tabelas) - usando função com cache
 $setores = get_lista_setores($con);
+
+// Organiza setores para UX no Admin
+$setores_centro_admin = array_values(array_filter($setores, function($s) { return $s === 'centro_administrativo'; }));
+$setores_externos_admin = array_values(array_filter($setores, function($s) { return $s === 'externos'; }));
+$setores_internos_admin = array_values(array_filter($setores, function($s) {
+	return $s !== 'externos' && $s !== 'centro_administrativo';
+}));
 
 // Sanitização de tabela
 function sanitize_table(string $t, array $allowed): ?string {
@@ -78,7 +104,7 @@ $setores_emails = obter_setores_emails($con);
 $setor_email_sel = $_GET['setor_email'] ?? ($setores_emails[0] ?? '');
 $emails_registros = [];
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['crud_email'])) {
+if (!$csrf_error && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['crud_email'])) {
 	$crud_email = $_POST['crud_email'];
 	
 	if ($crud_email === 'create_email') {
@@ -182,7 +208,7 @@ if (!empty($setor_email_sel) && in_array($setor_email_sel, $setores_emails)) {
 // CRUD ações
 $msg = '';
 $msg_type = 'success'; // 'success' ou 'error'
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['crud'])) {
+if (!$csrf_error && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['crud'])) {
 	$tabela = sanitize_table($_POST['tabela'] ?? '', $setores);
 	if ($tabela) {
 		$crud = $_POST['crud'];
@@ -270,9 +296,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['crud'])) {
 
 // Tabela selecionada para listagem
 $tabela_sel = sanitize_table($_GET['setor'] ?? ($setores[0] ?? ''), $setores);
+$q = trim($_GET['q'] ?? '');
+$q_param = $q !== '' ? '&q=' . urlencode($q) : '';
 $registros = [];
 if ($tabela_sel) {
-	$stmt = $con->prepare("SELECT id, sub_setor, descricao, falar_com, ramal, emergencia, oculto, principal FROM `$tabela_sel` ORDER BY sub_setor, descricao LIMIT 500");
+	if ($q !== '') {
+		$like = '%' . $q . '%';
+		// Filtra por campos principais
+		$stmt = $con->prepare("SELECT id, sub_setor, descricao, falar_com, ramal, emergencia, oculto, principal
+			FROM `$tabela_sel`
+			WHERE (COALESCE(sub_setor,'') LIKE ? OR COALESCE(descricao,'') LIKE ? OR COALESCE(falar_com,'') LIKE ? OR COALESCE(ramal,'') LIKE ?)
+			ORDER BY sub_setor, descricao
+			LIMIT 500");
+		$stmt->bind_param('ssss', $like, $like, $like, $like);
+	} else {
+		$stmt = $con->prepare("SELECT id, sub_setor, descricao, falar_com, ramal, emergencia, oculto, principal FROM `$tabela_sel` ORDER BY sub_setor, descricao LIMIT 500");
+	}
 	$stmt->execute();
 	$res = $stmt->get_result();
 	while ($row = $res->fetch_assoc()) { $registros[] = $row; }
@@ -287,6 +326,8 @@ if ($tabela_sel) {
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Painel Admin - Ramais</title>
 	<link rel="manifest" href="./manifest.json">
+	<link rel="icon" type="image/png" href="<?= BASE_PATH ?>/ico.png">
+	<link rel="apple-touch-icon" href="<?= BASE_PATH ?>/ico.png">
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -921,6 +962,9 @@ if ($tabela_sel) {
 </head>
 <body>
 	<div class="container">
+		<script>
+			window.csrfToken = '<?php echo h($csrf_token); ?>';
+		</script>
 		<div class="header">
 			<h1>⚙️ Painel Administrativo</h1>
 			<div class="header-actions">
@@ -930,6 +974,11 @@ if ($tabela_sel) {
 		</div>
 		
 		<div class="content">
+			<?php if ($csrf_error): ?>
+				<div class="msg error" style="margin: 20px 32px;">
+					⚠️ Token de segurança inválido (CSRF). Recarregue a página e tente novamente.
+				</div>
+			<?php endif; ?>
 			<?php if (!empty($msg)): ?>
 				<div class="msg <?php echo $msg_type === 'error' ? 'error' : ''; ?>" style="margin: 20px 32px;">
 					<?php echo $msg_type === 'error' ? '⚠️' : '✓'; ?>
@@ -966,6 +1015,24 @@ if ($tabela_sel) {
 						</p>
 					</div>
 				</div>
+
+				<?php
+				// Sugestão de importação do Centro Administrativo (quando ainda estiver vazio)
+				$stmt_centro_count = $con->query("SELECT COUNT(*) as total FROM centro_administrativo");
+				$total_centro = $stmt_centro_count ? (int)($stmt_centro_count->fetch_assoc()['total'] ?? 0) : 0;
+				$arquivo_centro_existe = file_exists(__DIR__ . '/novos_ramais.sql');
+				if ($total_centro === 0 && $arquivo_centro_existe):
+				?>
+					<div class="section" style="background: #eef7ff; border-left: 4px solid #1976d2;">
+						<h2 class="section-title">🏛️ Importar Ramais — Centro Administrativo</h2>
+						<p style="color: #0b4f6c; margin-bottom: 16px;">
+							A tabela do <strong>Centro Administrativo</strong> está vazia. Você pode importar os dados do arquivo <code>novos_ramais.sql</code>.
+						</p>
+						<a href="./importar_centro_administrativo.php" style="display: inline-block; padding: 12px 24px; background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: 600;">
+							📥 Importar Centro Administrativo
+						</a>
+					</div>
+				<?php endif; ?>
 				
 				<div class="section">
 					<h2 class="section-title">📂 Selecionar Setor</h2>
@@ -973,17 +1040,58 @@ if ($tabela_sel) {
 						<div class="form-group" style="max-width: 300px;">
 							<label for="setor">Setor</label>
 							<select id="setor" name="setor" onchange="this.form.submit()">
-								<?php foreach ($setores as $s): ?>
-									<option value="<?php echo h($s); ?>" <?php echo $s === $tabela_sel ? 'selected' : ''; ?>><?php echo formatar_nome_setor($s); ?></option>
-								<?php endforeach; ?>
+								<?php if (!empty($setores_centro_admin)): ?>
+									<optgroup label="🏛️ Centro Administrativo">
+										<?php foreach ($setores_centro_admin as $s): ?>
+											<option value="<?php echo h($s); ?>" <?php echo $s === $tabela_sel ? 'selected' : ''; ?>>
+												<?php echo formatar_nome_setor($s); ?>
+											</option>
+										<?php endforeach; ?>
+									</optgroup>
+								<?php endif; ?>
+								<?php if (!empty($setores_externos_admin)): ?>
+									<optgroup label="📞 Ramais Externos">
+										<?php foreach ($setores_externos_admin as $s): ?>
+											<option value="<?php echo h($s); ?>" <?php echo $s === $tabela_sel ? 'selected' : ''; ?>>
+												<?php echo formatar_nome_setor($s); ?>
+											</option>
+										<?php endforeach; ?>
+									</optgroup>
+								<?php endif; ?>
+								<?php if (!empty($setores_internos_admin)): ?>
+									<optgroup label="🏢 Setores Internos">
+										<?php foreach ($setores_internos_admin as $s): ?>
+											<option value="<?php echo h($s); ?>" <?php echo $s === $tabela_sel ? 'selected' : ''; ?>>
+												<?php echo formatar_nome_setor($s); ?>
+											</option>
+										<?php endforeach; ?>
+									</optgroup>
+								<?php endif; ?>
 							</select>
 						</div>
+						<div class="form-group" style="max-width: 420px;">
+							<label for="q">Buscar no setor</label>
+							<input type="text" id="q" name="q" placeholder="Digite nome, ramal, descrição ou sub-setor..." value="<?php echo h($q); ?>">
+						</div>
+						<div class="form-group" style="max-width: 220px;">
+							<label>&nbsp;</label>
+							<div style="display:flex; gap:10px; flex-wrap:wrap;">
+								<button class="primary" type="submit" style="padding: 12px 18px;">🔍 Buscar</button>
+								<?php if (!empty($q)): ?>
+									<a href="./admin.php?setor=<?php echo urlencode($tabela_sel); ?>" style="padding: 12px 18px; border-radius: 8px; text-decoration: none; background: #edf2f7; color: #2d3748; font-weight: 600; border: 2px solid #e2e8f0;">Limpar</a>
+								<?php endif; ?>
+							</div>
+						</div>
 					</form>
+					<?php if (!empty($q)): ?>
+						<p class="info-text" style="margin-top: 12px;">🔎 Filtro ativo: <strong><?php echo h($q); ?></strong> (máx. 500 resultados)</p>
+					<?php endif; ?>
 				</div>
 
 				<div class="section">
 					<h2 class="section-title">➕ Novo Ramal</h2>
-					<form method="post" class="form-inline" action="./admin.php?setor=<?php echo urlencode($tabela_sel); ?>">
+					<form method="post" class="form-inline" action="./admin.php?setor=<?php echo urlencode($tabela_sel); ?><?php echo h($q_param); ?>">
+						<input type="hidden" name="csrf_token" value="<?php echo h($csrf_token); ?>">
 						<input type="hidden" name="crud" value="create">
 						<input type="hidden" name="tabela" value="<?php echo h($tabela_sel); ?>">
 						<div class="form-group">
@@ -1045,7 +1153,8 @@ if ($tabela_sel) {
 						<tr id="row-<?php echo (int)$r['id']; ?>" class="<?php echo ($r['emergencia'] ?? 0) ? 'emergencia-row' : ''; ?> <?php echo ($r['oculto'] ?? 0) ? 'oculto-row' : ''; ?> <?php echo ($r['principal'] ?? 0) ? 'principal-row' : ''; ?>">
 							<td><?php echo (int)$r['id']; ?></td>
 							<td>
-								<form method="post" class="form-inline status-form" action="./admin.php?setor=<?php echo urlencode($tabela_sel); ?>">
+								<form method="post" class="form-inline status-form" action="./admin.php?setor=<?php echo urlencode($tabela_sel); ?><?php echo h($q_param); ?>">
+									<input type="hidden" name="csrf_token" value="<?php echo h($csrf_token); ?>">
 									<input type="hidden" name="crud" value="update">
 									<input type="hidden" name="tabela" value="<?php echo h($tabela_sel); ?>">
 									<input type="hidden" name="id" value="<?php echo (int)$r['id']; ?>">
@@ -1074,7 +1183,8 @@ if ($tabela_sel) {
 								<button class="save" type="submit">💾 Salvar</button>
 								</form>
 								<button class="transfer" type="button" data-id="<?php echo (int)$r['id']; ?>" data-tabela="<?php echo h($tabela_sel); ?>" data-contato="<?php echo h(formatar_contato($r)); ?>">↔️ Transferir</button>
-								<form method="post" action="./admin.php?setor=<?php echo urlencode($tabela_sel); ?>" onsubmit="return confirm('Tem certeza que deseja remover este registro?');" style="display:inline">
+								<form method="post" action="./admin.php?setor=<?php echo urlencode($tabela_sel); ?><?php echo h($q_param); ?>" onsubmit="return confirm('Tem certeza que deseja remover este registro?');" style="display:inline">
+									<input type="hidden" name="csrf_token" value="<?php echo h($csrf_token); ?>">
 									<input type="hidden" name="crud" value="delete">
 									<input type="hidden" name="tabela" value="<?php echo h($tabela_sel); ?>">
 									<input type="hidden" name="id" value="<?php echo (int)$r['id']; ?>">
@@ -1271,6 +1381,7 @@ if ($tabela_sel) {
 			<div class="modal-body">
 				<p id="modalInfo"></p>
 				<form id="formTransferir" method="post" action="./admin.php?setor=<?php echo urlencode($tabela_sel); ?>">
+					<input type="hidden" name="csrf_token" value="<?php echo h($csrf_token); ?>">
 					<input type="hidden" name="crud" value="transfer">
 					<input type="hidden" name="tabela" id="tabelaOrigem">
 					<input type="hidden" name="id" id="ramalId">
@@ -1279,36 +1390,49 @@ if ($tabela_sel) {
 						<select id="tabelaDestino" name="tabela_destino" required>
 							<option value="">Selecione um setor...</option>
 							<?php 
-							// Separar setores internos e externos
-							$setores_internos_admin = array_filter($setores, function($s) {
-								return $s !== 'externos';
-							});
 							$origem_e_externo = ($tabela_sel === 'externos');
 							
-							// Se origem é interno, só pode transferir para outros internos
-							// Se origem é externo, pode transferir para qualquer lugar
-							$setores_disponiveis = $origem_e_externo ? $setores : $setores_internos_admin;
-							
-							foreach ($setores_disponiveis as $s): 
-								if ($s !== $tabela_sel): 
+							// Se origem é interno/centro, não pode transferir para Externos.
+							$allowed_centro = $setores_centro_admin;
+							$allowed_internos = $setores_internos_admin;
+							$allowed_externos = $setores_externos_admin;
+							if (!$origem_e_externo) {
+								$allowed_externos = [];
+							}
 							?>
-								<option value="<?php echo h($s); ?>"><?php echo formatar_nome_setor($s); ?></option>
-							<?php 
-								endif;
-							endforeach; 
-							?>
+							<?php if (!empty($allowed_centro)): ?>
+								<optgroup label="🏛️ Centro Administrativo">
+									<?php foreach ($allowed_centro as $s): if ($s !== $tabela_sel): ?>
+										<option value="<?php echo h($s); ?>"><?php echo formatar_nome_setor($s); ?></option>
+									<?php endif; endforeach; ?>
+								</optgroup>
+							<?php endif; ?>
+							<?php if (!empty($allowed_externos)): ?>
+								<optgroup label="📞 Ramais Externos">
+									<?php foreach ($allowed_externos as $s): if ($s !== $tabela_sel): ?>
+										<option value="<?php echo h($s); ?>"><?php echo formatar_nome_setor($s); ?></option>
+									<?php endif; endforeach; ?>
+								</optgroup>
+							<?php endif; ?>
+							<?php if (!empty($allowed_internos)): ?>
+								<optgroup label="🏢 Setores Internos">
+									<?php foreach ($allowed_internos as $s): if ($s !== $tabela_sel): ?>
+										<option value="<?php echo h($s); ?>"><?php echo formatar_nome_setor($s); ?></option>
+									<?php endif; endforeach; ?>
+								</optgroup>
+							<?php endif; ?>
 						</select>
 						<div class="warning-box-small">
 							<?php if (!$origem_e_externo): ?>
 								<strong class="warning-box-small-title">⚠️ Restrição Aplicada</strong>
 								<span class="warning-box-small-text">
-									Este é um ramal <strong>interno</strong>. Ele só pode ser transferido para outros setores internos. 
+									Este é um ramal <strong>interno</strong> (inclui <strong>Centro Administrativo</strong>). Ele só pode ser transferido para setores internos/centro.
 									Ramais externos não aparecem na lista acima.
 								</span>
 							<?php else: ?>
 								<strong class="warning-box-small-title">ℹ️ Informação</strong>
 								<span class="warning-box-small-text">
-									Este é um ramal <strong>externo</strong>. Ele pode ser transferido para qualquer setor (interno ou externo).
+									Este é um ramal <strong>externo</strong>. Ele pode ser transferido para qualquer setor (interno, centro ou externo).
 								</span>
 							<?php endif; ?>
 						</div>
@@ -1503,7 +1627,7 @@ if ($tabela_sel) {
 						const response = await fetch('./api.php', {
 							method: 'POST',
 							headers: { 'Content-Type': 'application/json' },
-							body: JSON.stringify({ id, tabela, field, value })
+							body: JSON.stringify({ id, tabela, field, value, csrf_token: window.csrfToken })
 						});
 
 						const result = await response.json();

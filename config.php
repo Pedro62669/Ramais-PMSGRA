@@ -6,6 +6,61 @@ define('BASE_PATH', $base_path === '/' ? '' : $base_path);
 // Centraliza credenciais do banco. Ajuste via variáveis de ambiente para produção
 // Ex.: export DB_HOST=localhost DB_USER=user DB_PASS=secret DB_NAME=ramais_v2
 
+/**
+ * Detecta se a requisição está em HTTPS (inclui cenários atrás de proxy).
+ */
+function is_https_request(): bool {
+	if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') return true;
+	if (!empty($_SERVER['SERVER_PORT']) && (string)$_SERVER['SERVER_PORT'] === '443') return true;
+	if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') return true;
+	return false;
+}
+
+/**
+ * Inicia a sessão com configurações seguras (compatível com HTTP local e mais rígido em HTTPS).
+ * Chame isso no lugar de session_start().
+ */
+function start_app_session(): void {
+	if (session_status() === PHP_SESSION_ACTIVE) return;
+
+	// Endurecimento básico
+	ini_set('session.use_strict_mode', '1');
+	ini_set('session.use_only_cookies', '1');
+	ini_set('session.cookie_httponly', '1');
+
+	$secure = is_https_request();
+
+	// PHP 7.3+ suporta array com samesite
+	session_set_cookie_params([
+		'lifetime' => 0,
+		'path' => '/',
+		'domain' => '',
+		'secure' => $secure,
+		'httponly' => true,
+		'samesite' => 'Lax',
+	]);
+
+	session_start();
+}
+
+/**
+ * CSRF token (para Admin/API).
+ */
+function get_csrf_token(): string {
+	start_app_session();
+	if (empty($_SESSION['_csrf_token']) || !is_string($_SESSION['_csrf_token'])) {
+		$_SESSION['_csrf_token'] = bin2hex(random_bytes(32));
+	}
+	return $_SESSION['_csrf_token'];
+}
+
+function verify_csrf_token(?string $token): bool {
+	start_app_session();
+	if (!is_string($token) || $token === '') return false;
+	$expected = $_SESSION['_csrf_token'] ?? '';
+	return is_string($expected) && $expected !== '' && hash_equals($expected, $token);
+}
+
 function get_db_credentials(): array {
 	$host = getenv('DB_HOST') ?: 'localhost';
 	$user = getenv('DB_USER') ?: 'pmsgra';
@@ -86,6 +141,9 @@ function limpar_cache_setores(): void {
  * @return string Nome formatado (ex: "Acao social")
  */
 function formatar_nome_setor(string $setor): string {
+	// Nomes “especiais” (melhor UX)
+	if ($setor === 'centro_administrativo') return 'Centro Administrativo';
+	if ($setor === 'externos') return 'Externos';
 	return ucfirst(str_replace('_', ' ', $setor));
 }
 
@@ -381,6 +439,33 @@ function obter_setores_emails(?mysqli $conexao = null): array {
 	
 	$stmt->close();
 	return $setores;
+}
+
+/**
+ * Garante que a tabela de Centro Administrativo exista (vazia por padrão).
+ * Mantém o schema compatível com as tabelas de ramais existentes.
+ */
+function garantir_tabela_centro_administrativo(?mysqli $conexao = null): void {
+	if ($conexao === null) {
+		$conexao = get_db_connection();
+	}
+
+	$result = $conexao->query("SHOW TABLES LIKE 'centro_administrativo'");
+	if ($result && $result->num_rows == 0) {
+		$conexao->query("CREATE TABLE IF NOT EXISTS `centro_administrativo` (
+			`id` int NOT NULL AUTO_INCREMENT,
+			`sub_setor` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+			`descricao` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+			`falar_com` varchar(255) COLLATE utf8mb4_general_ci DEFAULT NULL,
+			`ramal` varchar(50) COLLATE utf8mb4_general_ci DEFAULT NULL,
+			`emergencia` tinyint(1) NOT NULL DEFAULT 0,
+			`oculto` tinyint(1) NOT NULL DEFAULT 0,
+			`principal` tinyint(1) NOT NULL DEFAULT 0,
+			PRIMARY KEY (`id`),
+			KEY `idx_ramal` (`ramal`),
+			KEY `idx_sub_setor` (`sub_setor`)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci");
+	}
 }
 
 
