@@ -1,4 +1,4 @@
-const CACHE_NAME = "ramais-cache-v2";
+const CACHE_NAME = "ramais-cache-v3";
 const ASSETS = [
   "./",
   "./index.php",
@@ -43,9 +43,30 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Para mesmos origem e assets estáticos, cache-first
+  // Para mesmos origem e assets estáticos
   const staticDestinations = ["script", "style", "image", "font", "manifest"];
   if (url.origin === self.location.origin && staticDestinations.includes(request.destination)) {
+    // Scripts/Styles: stale-while-revalidate para evitar CSS/JS preso no cache antigo
+    if (request.destination === "script" || request.destination === "style") {
+      event.respondWith(
+        caches.match(request).then((cached) => {
+          const fetchPromise = fetch(request)
+            .then((response) => {
+              if (response && response.ok) {
+                const responseClone = response.clone();
+                caches.open(CACHE_NAME).then((cache) => cache.put(request, responseClone));
+              }
+              return response;
+            })
+            .catch(() => cached);
+
+          return cached || fetchPromise;
+        })
+      );
+      return;
+    }
+
+    // Outros assets estáticos: cache-first
     event.respondWith(
       caches.match(request).then((cached) =>
         cached || fetch(request).then((response) => {
