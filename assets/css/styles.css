@@ -310,6 +310,23 @@ form button {
     padding: 18px 16px;
 }
 
+.results-table thead th a.sort-link{
+    color: inherit !important;
+    text-decoration: none !important;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.results-table thead th a.sort-link:hover{
+    text-decoration: underline !important;
+}
+
+.results-table thead th a.sort-link.active{
+    text-decoration: underline !important;
+}
+
 .results-table tbody tr {
     transition: all 0.2s;
 }
@@ -379,6 +396,53 @@ form button {
     align-items: center;
     justify-content: center;
     gap: 6px;
+}
+
+.btn-ligar {
+    background: linear-gradient(135deg, var(--leaf) 0%, var(--leaf-700) 100%);
+    color: #fff;
+    border: none;
+    padding: 10px 18px;
+    font-size: 13px;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(46,125,50,0.3);
+    min-width: 80px;
+    touch-action: manipulation;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    text-decoration: none;
+}
+
+.btn-ligar:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(46,125,50,0.4);
+}
+
+.btn-ligar:active {
+    transform: translateY(0);
+}
+
+.btn-ligar.btn-emergencia {
+    background: linear-gradient(135deg, #d32f2f 0%, #b71c1c 100%);
+    box-shadow: 0 2px 8px rgba(211,47,47,0.3);
+}
+
+.btn-ligar.btn-emergencia:hover {
+    box-shadow: 0 4px 12px rgba(211,47,47,0.4);
+}
+
+.btn-ligar.btn-principal {
+    background: linear-gradient(135deg, #1976d2 0%, #1565c0 100%);
+    box-shadow: 0 2px 8px rgba(25,118,210,0.3);
+}
+
+.btn-ligar.btn-principal:hover {
+    box-shadow: 0 4px 12px rgba(25,118,210,0.4);
 }
 
 .btn-copiar:hover { 
@@ -451,6 +515,10 @@ form button {
 
 @media (min-width: 768px) {
     .btn-copiar {
+        padding: 8px 16px;
+        min-width: 90px;
+    }
+    .btn-ligar {
         padding: 8px 16px;
         min-width: 90px;
     }
@@ -619,6 +687,11 @@ form button {
     
     /* Botões mais fáceis de tocar */
     .btn-copiar {
+        padding: 12px 16px;
+        font-size: 13px;
+        min-width: 70px;
+    }
+    .btn-ligar {
         padding: 12px 16px;
         font-size: 13px;
         min-width: 70px;

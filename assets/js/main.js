@@ -22,6 +22,7 @@
     function init() {
         elements.buscaInput = document.getElementById('busca-input');
         elements.setorSelect = document.getElementById('setor-select');
+        elements.ordemSelect = document.getElementById('ordem-select');
         elements.contentContainer = document.getElementById('content-container');
         
         if (!elements.buscaInput || !elements.setorSelect || !elements.contentContainer) {
@@ -78,9 +79,9 @@
         const termoBusca = elements.buscaInput.value.trim();
         const setorBusca = elements.setorSelect.value;
         
-        // Obter o tipo atual da URL ou padrão 'interno'
         const urlParams = new URLSearchParams(window.location.search);
-        const tipoRamal = urlParams.get('tipo') || 'interno';
+        const tipoRamal = urlParams.get('tipo') || 'centro';
+        const ordem = urlParams.get('ordem') || 'contato_asc';
         
         elements.contentContainer.classList.add('loading');
         
@@ -88,6 +89,7 @@
             busca: termoBusca,
             setor: setorBusca,
             tipo: tipoRamal,
+            ordem,
             pagina: page,
             ajax: 1
         });
@@ -95,7 +97,7 @@
         const url = window.location.pathname + '?' + params.toString();
         window.history.pushState({ path: url }, '', url);
         
-        fetch(url)
+        fetch(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
             .then(response => {
                 if (!response.ok) throw new Error('Erro na resposta do servidor');
                 return response.text();

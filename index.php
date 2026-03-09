@@ -10,7 +10,9 @@ start_app_session();
 // =====================================================================
 
 // DETECTA SE A REQUISIÇÃO É AJAX (CHAVE PARA O LIVE SEARCH)
-$is_ajax = isset($_REQUEST['ajax']) && $_REQUEST['ajax'] == 1;
+// Só retorna fragmento quando for XHR; recarregar com ajax=1 na URL deve retornar página completa
+$is_xhr = !empty($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+$is_ajax = isset($_REQUEST['ajax']) && $_REQUEST['ajax'] == 1 && $is_xhr;
 
 // Configurações de paginação
 $itens_por_pagina = 20;
@@ -25,7 +27,12 @@ $lista_setores = get_lista_setores($conexao);
 $todos_os_resultados = [];
 $termo_busca = trim($_GET['busca'] ?? '');
 $setor_busca = $_GET['setor'] ?? 'todos';
-$tipo_ramal = $_GET['tipo'] ?? 'interno'; // 'interno' | 'externo' | 'centro'
+$tipo_ramal = $_GET['tipo'] ?? 'centro'; // 'interno' | 'externo' | 'centro'
+$ordem = $_GET['ordem'] ?? 'contato_asc'; // contato_asc | contato_desc | ramal_asc | ramal_desc
+$ordens_validas = ['contato_asc', 'contato_desc', 'ramal_asc', 'ramal_desc'];
+if (!in_array($ordem, $ordens_validas, true)) {
+    $ordem = 'contato_asc';
+}
 $tipos_validos = ['interno', 'externo', 'centro'];
 if (!in_array($tipo_ramal, $tipos_validos, true)) {
     $tipo_ramal = 'interno';
@@ -99,10 +106,20 @@ if ($tipo_ramal === 'centro') {
 
     // Página
     if ($total_resultados > 0) {
+        $ramal_sort = "CAST(SUBSTRING_INDEX(COALESCE(ramal,''), '/', 1) AS UNSIGNED)";
+        $order_sql = 'principal DESC, emergencia DESC, falar_com ASC, descricao ASC, sub_setor ASC, ' . $ramal_sort . ' ASC';
+        if ($ordem === 'contato_desc') {
+            $order_sql = 'principal DESC, emergencia DESC, falar_com DESC, descricao DESC, sub_setor DESC, ' . $ramal_sort . ' DESC';
+        } elseif ($ordem === 'ramal_asc') {
+            $order_sql = 'principal DESC, emergencia DESC, ' . $ramal_sort . ' ASC, sub_setor ASC, falar_com ASC, descricao ASC';
+        } elseif ($ordem === 'ramal_desc') {
+            $order_sql = 'principal DESC, emergencia DESC, ' . $ramal_sort . ' DESC, sub_setor ASC, falar_com ASC, descricao ASC';
+        }
+
         $sql_sel = "SELECT id, sub_setor, descricao, falar_com, ramal, emergencia, oculto, principal, 'centro_administrativo' as setor
                     FROM centro_administrativo
                     $where_sql
-                    ORDER BY principal DESC, emergencia DESC, sub_setor, descricao
+                    ORDER BY $order_sql
                     LIMIT ? OFFSET ?";
         $stmt_sel = $conexao->prepare($sql_sel);
         $types_sel = $types . 'ii';
@@ -275,7 +292,16 @@ if (!empty($queries)) {
     // Busca resultados paginados
     if ($total_resultados > 0) {
         // Prioriza ramais principais no topo (depois emergência) e mantém ordenação estável
-        $sql_paginado = $sql_base . " ORDER BY principal DESC, emergencia DESC, setor, sub_setor, descricao LIMIT ? OFFSET ?";
+        $ramal_sort = "CAST(SUBSTRING_INDEX(COALESCE(ramal,''), '/', 1) AS UNSIGNED)";
+        $order_sql = 'principal DESC, emergencia DESC, falar_com ASC, descricao ASC, setor ASC, sub_setor ASC, ' . $ramal_sort . ' ASC';
+        if ($ordem === 'contato_desc') {
+            $order_sql = 'principal DESC, emergencia DESC, falar_com DESC, descricao DESC, setor DESC, sub_setor DESC, ' . $ramal_sort . ' DESC';
+        } elseif ($ordem === 'ramal_asc') {
+            $order_sql = 'principal DESC, emergencia DESC, ' . $ramal_sort . ' ASC, setor ASC, sub_setor ASC, descricao ASC';
+        } elseif ($ordem === 'ramal_desc') {
+            $order_sql = 'principal DESC, emergencia DESC, ' . $ramal_sort . ' DESC, setor ASC, sub_setor ASC, descricao ASC';
+        }
+        $sql_paginado = $sql_base . " ORDER BY $order_sql LIMIT ? OFFSET ?";
         $stmt_paginado = $conexao->prepare($sql_paginado);
         
         if (!empty($termo_busca) && !empty($params_count)) {
@@ -417,6 +443,25 @@ endif; // FIM DO BLOCO IF(!$is_ajax)
             <?php endif; ?>
             
             <div class="results-container">
+                <?php
+                    // Links de ordenação no cabeçalho (remove ajax para permitir navegação sem JS)
+                    $sort_params = $_GET;
+                    unset($sort_params['ajax']);
+                    $sort_params['pagina'] = 1;
+
+                    $url_ordem_contato_asc = '?' . http_build_query(array_merge($sort_params, ['ordem' => 'contato_asc']));
+                    $url_ordem_contato_desc = '?' . http_build_query(array_merge($sort_params, ['ordem' => 'contato_desc']));
+                    $url_ordem_ramal_asc = '?' . http_build_query(array_merge($sort_params, ['ordem' => 'ramal_asc']));
+                    $url_ordem_ramal_desc = '?' . http_build_query(array_merge($sort_params, ['ordem' => 'ramal_desc']));
+
+                    $url_ordem_contato_toggle = ($ordem === 'contato_asc') ? $url_ordem_contato_desc : $url_ordem_contato_asc;
+                    $url_ordem_ramal_toggle = ($ordem === 'ramal_asc') ? $url_ordem_ramal_desc : $url_ordem_ramal_asc;
+
+                    $contato_arrow = ($ordem === 'contato_desc') ? '↓' : (($ordem === 'contato_asc') ? '↑' : '↑↓');
+                    $ramal_arrow = ($ordem === 'ramal_desc') ? '↓' : (($ordem === 'ramal_asc') ? '↑' : '↑↓');
+                    $contato_next = ($ordem === 'contato_asc') ? 'contato_desc' : 'contato_asc';
+                    $ramal_next = ($ordem === 'ramal_asc') ? 'ramal_desc' : 'ramal_asc';
+                ?>
                 <?php if (!empty($todos_os_resultados)): ?>
                     <div class="results-info">
                         Mostrando <?= count($todos_os_resultados) ?> de <?= $total_resultados ?> resultados
@@ -429,8 +474,22 @@ endif; // FIM DO BLOCO IF(!$is_ajax)
                             <tr>
                                 <th class="setor-col">Setor</th>
                                 <th class="sub-setor-col">Sub-setor</th>
-                                <th class="descricao-col">Falar com / Descrição</th>
-                                <th class="ramal-col">Ramal</th>
+                                <th class="descricao-col">
+                                    <a class="sort-link <?= ($ordem === 'contato_asc' || $ordem === 'contato_desc') ? 'active' : '' ?>"
+                                       href="<?= h($url_ordem_contato_toggle) ?>"
+                                       style="color:#fff;text-decoration:none;"
+                                       data-ordem="<?= h($contato_next) ?>">
+                                        Falar com / Descrição <?= h($contato_arrow) ?>
+                                    </a>
+                                </th>
+                                <th class="ramal-col">
+                                    <a class="sort-link <?= ($ordem === 'ramal_asc' || $ordem === 'ramal_desc') ? 'active' : '' ?>"
+                                       href="<?= h($url_ordem_ramal_toggle) ?>"
+                                       style="color:#fff;text-decoration:none;"
+                                       data-ordem="<?= h($ramal_next) ?>">
+                                        Ramal <?= h($ramal_arrow) ?>
+                                    </a>
+                                </th>
                                 <th class="acoes-col">Ações</th>
                             </tr>
                         </thead>
@@ -452,12 +511,23 @@ endif; // FIM DO BLOCO IF(!$is_ajax)
                                         echo (isset($linha['principal']) && $linha['principal']) ? 'color: #1976d2; font-weight: 700;' : ''; 
                                     ?>"><?= h($linha['ramal']) ?></td>
                                     <td class="acoes-col">
-                                        <button class="btn-copiar <?php 
-                                            echo (isset($linha['emergencia']) && $linha['emergencia']) ? 'btn-emergencia' : ''; 
-                                            echo (isset($linha['principal']) && $linha['principal']) ? 'btn-principal' : ''; 
-                                        ?>" data-ramal="<?= h($linha['ramal']) ?>">
-                                            📋 Copiar
-                                        </button>
+                                        <?php if (($linha['setor'] ?? '') === 'centro_administrativo'): ?>
+                                            <?php $sip_ramal = trim((string)($linha['ramal'] ?? '')); ?>
+                                            <a class="btn-ligar <?php 
+                                                echo (isset($linha['emergencia']) && $linha['emergencia']) ? 'btn-emergencia' : ''; 
+                                                echo (isset($linha['principal']) && $linha['principal']) ? 'btn-principal' : ''; 
+                                            ?>" href="sip:<?= rawurlencode($sip_ramal) ?>@192.168.201.15"
+                                               style="background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%); color:#fff; border:none; padding:10px 18px; font-size:13px; font-weight:600; border-radius:8px; cursor:pointer; transition:all .2s; box-shadow:0 2px 8px rgba(46,125,50,.3); min-width:80px; touch-action:manipulation; display:inline-flex; align-items:center; justify-content:center; gap:6px; text-decoration:none;">
+                                                Ligar
+                                            </a>
+                                        <?php else: ?>
+                                            <button class="btn-copiar <?php 
+                                                echo (isset($linha['emergencia']) && $linha['emergencia']) ? 'btn-emergencia' : ''; 
+                                                echo (isset($linha['principal']) && $linha['principal']) ? 'btn-principal' : ''; 
+                                            ?>" data-ramal="<?= h($linha['ramal']) ?>">
+                                                📋 Copiar
+                                            </button>
+                                        <?php endif; ?>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -490,12 +560,23 @@ endif; // FIM DO BLOCO IF(!$is_ajax)
                                     <div class="card-subsetor"><?= h(formatar_sub_setor($linha['sub_setor'] ?? null)) ?></div>
                                 </div>
                                 <div class="card-actions">
-                                    <button class="btn-copiar <?php 
-                                        echo (isset($linha['emergencia']) && $linha['emergencia']) ? 'btn-emergencia' : ''; 
-                                        echo (isset($linha['principal']) && $linha['principal']) ? 'btn-principal' : ''; 
-                                    ?>" data-ramal="<?= h($linha['ramal']) ?>">
-                                        📋 Copiar Ramal
-                                    </button>
+                                    <?php if (($linha['setor'] ?? '') === 'centro_administrativo'): ?>
+                                        <?php $sip_ramal = trim((string)($linha['ramal'] ?? '')); ?>
+                                        <a class="btn-ligar <?php 
+                                            echo (isset($linha['emergencia']) && $linha['emergencia']) ? 'btn-emergencia' : ''; 
+                                            echo (isset($linha['principal']) && $linha['principal']) ? 'btn-principal' : ''; 
+                                        ?>" href="sip:<?= rawurlencode($sip_ramal) ?>@192.168.201.15"
+                                           style="background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%); color:#fff; border:none; padding:10px 18px; font-size:13px; font-weight:600; border-radius:8px; cursor:pointer; transition:all .2s; box-shadow:0 2px 8px rgba(46,125,50,.3); min-width:80px; touch-action:manipulation; display:inline-flex; align-items:center; justify-content:center; gap:6px; text-decoration:none;">
+                                            Ligar
+                                        </a>
+                                    <?php else: ?>
+                                        <button class="btn-copiar <?php 
+                                            echo (isset($linha['emergencia']) && $linha['emergencia']) ? 'btn-emergencia' : ''; 
+                                            echo (isset($linha['principal']) && $linha['principal']) ? 'btn-principal' : ''; 
+                                        ?>" data-ramal="<?= h($linha['ramal']) ?>">
+                                            📋 Copiar Ramal
+                                        </button>
+                                    <?php endif; ?>
                                 </div>
                             </div>
                         <?php endforeach; ?>
