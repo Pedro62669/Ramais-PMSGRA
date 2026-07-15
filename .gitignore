@@ -1,0 +1,18 @@
+# Credenciais reais do banco (use config.php.example como modelo)
+config.php
+
+# Dumps de banco de dados
+*.sql
+
+# Dados exportados das secretarias (contatos internos)
+secretarias/*.csv
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+*.log
+*.bak
+*.tmp
+*~
+.vscode/
+.idea/
