@@ -63,9 +63,17 @@ function verify_csrf_token(?string $token): bool {
 
 function get_db_credentials(): array {
 	$host = getenv('DB_HOST') ?: 'localhost';
-	$user = getenv('DB_USER') ?: 'seu_usuario';
-	$pass = getenv('DB_PASS') ?: 'sua_senha';
 	$name = getenv('DB_NAME') ?: 'ramais_v2';
+
+	// Usuário e senha NÃO têm valor padrão: devem vir de variáveis de ambiente
+	// (ex.: export DB_USER=... DB_PASS=...). Isso evita segredos escritos no código.
+	$user = getenv('DB_USER');
+	$pass = getenv('DB_PASS');
+	if ($user === false || $user === '' || $pass === false || $pass === '') {
+		error_log('Credenciais do banco ausentes: defina as variáveis de ambiente DB_USER e DB_PASS.');
+		die('Configuração incompleta: credenciais do banco não definidas.');
+	}
+
 	return [$host, $user, $pass, $name];
 }
 
